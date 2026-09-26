@@ -141,7 +141,7 @@ CELERY_TIMEZONE = "UTC"
 
 DATABASE_URL = os.getenv(
     'DATABASE_URL',
-    'postgresql://postgres:8r2cVGZdy4VJv92N@db.qmngpswdaqeoknzumfvg.supabase.co:5432/postgres'
+    'postgresql://devazdb_user:EBMYT5YqvOoIiv9nGxTqQG48afOdy10K@dpg-dar5b0c9v7es739i1vng-a.singapore-postgres.render.com/devazdb'
 )
 
 DATABASES = {
