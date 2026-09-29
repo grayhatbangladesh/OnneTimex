@@ -76,7 +76,11 @@ class FeedService:
     # ------------------------------------------------------------------
 
     def _tier1(self, exclude, limit=200):
-        from apps.recommendations.models import UserCategoryScore
+        try:
+            from apps.recommendations.models import UserCategoryScore
+        except ImportError:
+            # Recommendations app not installed — skip the interest tier entirely.
+            return []
         cats = list(
             UserCategoryScore.objects.filter(user=self.user)
             .order_by("-score").values_list("category_id", flat=True)[:5]
@@ -141,7 +145,11 @@ class FeedService:
     # ------------------------------------------------------------------
 
     def _targeted_ads(self, limit=20):
-        from apps.ads.models import Ad
+        try:
+            from apps.ads.models import Ad
+        except ImportError:
+            # Ads app not installed — feed must still render.
+            return []
         ads = list(
             Ad.objects.filter(status="active", started_at__lte=self._now, ends_at__gte=self._now)
             .select_related("advertiser")[:50]

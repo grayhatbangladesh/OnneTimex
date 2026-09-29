@@ -37,6 +37,55 @@ def _err(code, message, status_code=400):
     )
 
 
+# Top-level (flat) profile keys the app sends on PATCH /account/me/, mapped to
+# their canonical UserProfile field names.
+_PROFILE_ALIASES = {
+    "bio": "bio",
+    "website": "website",
+    "country": "country",
+    "city": "city",
+    "hometown": "hometown",
+    "hobbies": "hobbies",
+    "work": "work",
+    "education": "education",
+    "relationship": "relationship",
+    "public_contacts": "public_contacts",
+    "publiccontacts": "public_contacts",
+    "publicContacts": "public_contacts",
+    "social_links": "social_links",
+    "socialLinks": "social_links",
+    "other_info": "other_info",
+    "otherinfo": "other_info",
+    "otherInfo": "other_info",
+    "is_private": "is_private",
+    "full_name": "full_name",
+    "fullName": "full_name",
+}
+
+_USER_FIELDS = ("first_name", "last_name", "username", "email", "date_of_birth", "gender")
+
+
+def _save_profile_fields(profile, prof_data):
+    """Save the profile fields.
+
+    First try the whole payload; if any single value fails validation, fall back
+    to saving field-by-field so one bad value never silently drops the rest.
+    """
+    from apps.accounts.models import UserProfile
+
+    pser = ProfileUpdateSerializer(profile, data=prof_data, partial=True)
+    if pser.is_valid():
+        pser.save()
+        return
+    model_fields = {f.name for f in UserProfile._meta.fields}
+    for key, value in prof_data.items():
+        if key not in model_fields:
+            continue
+        sub = ProfileUpdateSerializer(profile, data={key: value}, partial=True)
+        if sub.is_valid():
+            sub.save()
+
+
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
@@ -125,42 +174,169 @@ class MeView(generics.RetrieveUpdateAPIView):
         return MeSerializer
 
     def update(self, request, *args, **kwargs):
-        ser = self.get_serializer(request.user, data=request.data, partial=True)
-        ser.is_valid(raise_exception=True)
-        ser.save()
+        data = request.data
+
+        # Support BOTH the nested {"profile": {...}} payload and the flat payload
+        # the app actually sends (bio, website, country, ... at the top level).
+        nested = data.get("profile")
+        if isinstance(nested, dict) and nested:
+            prof_data = dict(nested)
+        else:
+            prof_data = {}
+            for raw_key, canonical in _PROFILE_ALIASES.items():
+                if raw_key in data:
+                    prof_data[canonical] = data[raw_key]
+
+        # Social handles arrive as top-level "<site>Username" keys but are stored
+        # in the profile's social_links JSON (what the app reads back as socialLinks).
+        social = dict(prof_data["social_links"]) if isinstance(prof_data.get("social_links"), dict) else {}
+        for raw_key in data.keys():
+            if raw_key.endswith("Username") and isinstance(data[raw_key], str) and data[raw_key].strip():
+                social[raw_key] = data[raw_key].strip()
+        if social:
+            prof_data["social_links"] = social
+
+        user_payload = {k: data[k] for k in _USER_FIELDS if k in data}
+
+        # full_name (or "John Doe" in first_name) → first_name / last_name.
+        full_name = prof_data.pop("full_name", None)
+        if not isinstance(full_name, str) or not full_name.strip():
+            full_name = data.get("full_name") or data.get("fullName") or ""
+        if isinstance(full_name, str) and full_name.strip():
+            parts = full_name.split(None, 1)
+            if not str(user_payload.get("first_name") or "").strip():
+                user_payload["first_name"] = parts[0]
+            if len(parts) > 1 and not str(user_payload.get("last_name") or "").strip():
+                user_payload["last_name"] = parts[1]
+
         profile = getattr(request.user, "profile", None)
-        prof_data = request.data.get("profile")
-        if prof_data and profile:
-            pser = ProfileUpdateSerializer(profile, data=prof_data, partial=True)
-            if pser.is_valid():
-                pser.save()
+
+        # Update user fields if any
+        if user_payload:
+            ser = self.get_serializer(request.user, data=user_payload, partial=True)
+            ser.is_valid(raise_exception=True)
+            ser.save()
+
+        # Update profile fields if any
+        if prof_data:
+            if profile is None:
+                from apps.accounts.models import UserProfile
+
+                profile, _ = UserProfile.objects.get_or_create(user=request.user)
+            _save_profile_fields(profile, prof_data)
+
+        # Refresh user and profile from database to get latest data
+        request.user.refresh_from_db()
+        if profile is not None:
+            profile.refresh_from_db()
+
         return _ok(MeSerializer(request.user).data, "Updated.")
+
+
+def _store_profile_media(request, upload_keys):
+    """Save an uploaded file (or reuse a media id) and return (media_id, url).
+
+    The app sends `PATCH` multipart with the file; older clients send JSON
+    `{"media_id": ...}`. Both are supported.
+    """
+    media_id = request.data.get("media_id")
+    url = ""
+
+    uploaded = None
+    for key in upload_keys:
+        if key in request.FILES:
+            uploaded = request.FILES[key]
+            break
+    if uploaded is None:
+        for key in upload_keys:
+            if key in request.data and hasattr(request.data[key], "read"):
+                uploaded = request.data[key]
+                break
+
+    if uploaded is not None:
+        from apps.Media.models import Media
+
+        m = Media(
+            file=uploaded,
+            original_name=getattr(uploaded, "name", "") or "",
+            kind=Media.KIND_IMAGE,
+            content_type=getattr(uploaded, "content_type", "") or "",
+        )
+        m.save()
+        media_id = m.id
+        url = m.url
+    elif media_id:
+        try:
+            from apps.Media.models import Media
+
+            existing = Media.objects.filter(id=media_id).first()
+            url = existing.url if existing else ""
+        except Exception:
+            url = ""
+
+    return media_id, url
 
 
 class AvatarUpdateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        media_id = request.data.get("media_id")
+        return self._update(request)
+
+    # The Flutter app uploads with PATCH multipart.
+    patch = post
+
+    def _update(self, request):
         profile = getattr(request.user, "profile", None)
         if not profile:
             return _err("NO_PROFILE", "Profile not found.")
+
+        media_id, url = _store_profile_media(request, ("avatar", "image", "file"))
+        if not media_id:
+            return _err("NO_FILE", "No image received.")
+
         profile.avatar_media_id = media_id
         profile.save(update_fields=["avatar_media_id"])
-        return _ok({"avatar_media_id": str(media_id) or None}, "Avatar updated.")
+        return _ok(
+            {
+                "id": str(media_id),
+                "url": url,
+                # Nested shape the app reads on upload.
+                "profile": {"avatar": url, "avatar_media_id": str(media_id)},
+            },
+            "Avatar updated.",
+        )
 
 
 class CoverUpdateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        media_id = request.data.get("media_id")
+        return self._update(request)
+
+    patch = post
+
+    def _update(self, request):
         profile = getattr(request.user, "profile", None)
         if not profile:
             return _err("NO_PROFILE", "Profile not found.")
+
+        media_id, url = _store_profile_media(
+            request, ("cover_photo", "cover", "image", "file")
+        )
+        if not media_id:
+            return _err("NO_FILE", "No image received.")
+
         profile.cover_media_id = media_id
         profile.save(update_fields=["cover_media_id"])
-        return _ok({"cover_media_id": str(media_id) or None}, "Cover updated.")
+        return _ok(
+            {
+                "id": str(media_id),
+                "url": url,
+                "profile": {"cover_photo": url, "cover_media_id": str(media_id)},
+            },
+            "Cover updated.",
+        )
 
 
 class VerifyEmailView(APIView):

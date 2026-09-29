@@ -25,4 +25,5 @@ urlpatterns = [
     path("", include("apps.MeetSoc.urls.calls_urls")),
     path("", include("apps.MeetSoc.urls.sidebar_urls")),
     path("", include("apps.MeetSoc.urls.gaming_urls")),
+    path("", include("apps.MeetSoc.urls.admin_urls")),
 ]

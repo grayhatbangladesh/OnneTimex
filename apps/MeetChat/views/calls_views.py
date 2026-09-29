@@ -263,12 +263,14 @@ class IceServersView(APIView):
             {"urls": "stun:stun.voxgratia.org"},
             {"urls": "stun:stun.xten.com"},
         ]
-        if settings.TURN_SERVER_URL:
-            ice.append(
-                {
-                    "urls": settings.TURN_SERVER_URL,
-                    "username": settings.TURN_USERNAME,
-                    "credential": settings.TURN_CREDENTIAL,
-                }
-            )
+        turn_url = getattr(settings, "TURN_SERVER_URL", "") or ""
+        if turn_url:
+            turn_entry = {"urls": turn_url}
+            username = getattr(settings, "TURN_USERNAME", "")
+            credential = getattr(settings, "TURN_CREDENTIAL", "")
+            if username:
+                turn_entry["username"] = username
+            if credential:
+                turn_entry["credential"] = credential
+            ice.append(turn_entry)
         return Response({"success": True, "data": {"ice_servers": ice}, "message": "", "meta": {}})

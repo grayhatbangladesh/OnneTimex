@@ -6,8 +6,9 @@ from rest_framework.views import APIView
 
 from apps.MeetSoc.models import Group, GroupInvite, GroupMembership
 from apps.MeetSoc.serializers import GroupSerializer, GroupMembershipSerializer, GroupInviteSerializer
-from apps.MeetSoc.models import Post
-from apps.MeetSoc.serializers import PostListSerializer
+from apps.MeetSoc.models import Post, PostMedia
+from apps.MeetSoc.serializers import PostDetailSerializer, PostListSerializer
+from apps.MeetSoc.core.media_processing import optimize_media
 from apps.MeetSoc.core.utils import sanitize_html
 
 
@@ -171,6 +172,8 @@ class GroupJoinView(APIView):
             notify(
                 recipient_id=g.created_by_id,
                 actor_id=request.user.id,
+                # "group_invite" is a valid Notification.TYPES choice (there is no
+                # "group_join" choice) and is the type documented in the API spec.
                 notification_type="group_invite",
                 verb=f"{request.user.full_name or request.user.username} {verb_suffix} {g.name}",
                 data={"group_id": str(g.id), "group_slug": g.slug},
@@ -277,12 +280,66 @@ class GroupPostsView(APIView):
             privacy="public",
             group=g,
         )
+        # Same upload handling as POST /meetsoc/posts/ so group media actually saves.
+        for i, f in enumerate(request.FILES.getlist("files")):
+            mt = "video" if (f.content_type and f.content_type.startswith("video")) else "image"
+            PostMedia.objects.create(
+                post=p,
+                file=optimize_media(f),
+                media_type=mt,
+                order=i,
+            )
         g.posts_count = Post.objects.filter(group=g).count()
         g.save(update_fields=["posts_count"])
         return Response(
-            {"success": True, "data": {"id": str(p.id)}, "message": "Posted.", "meta": {}},
+            {
+                "success": True,
+                "data": PostDetailSerializer(p, context={"request": request}).data,
+                "message": "Posted.",
+                "meta": {},
+            },
             status=201,
         )
+
+
+class GroupMediaView(APIView):
+    """All media attached to a group's posts (the app calls this for the
+    group's Photos/Media tab)."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = None
+
+    def get(self, request, slug):
+        g = get_object_or_404(Group, slug=slug)
+        media = (
+            PostMedia.objects.filter(post__group=g)
+            .exclude(post__is_on_hold=True)
+            .select_related("post")
+            .order_by("-post__created_at")[:100]
+        )
+        data = [
+            {
+                "id": str(m.id),
+                "file": m.file.url if m.file else "",
+                "media_type": m.media_type,
+                "thumbnail": m.thumbnail.url if m.thumbnail else "",
+                # PostMedia has no created_at of its own — use the post's.
+                "created_at": m.post.created_at.isoformat() if m.post_id and m.post.created_at else "",
+            }
+            for m in media
+        ]
+        return Response({"success": True, "data": data, "message": "", "meta": {}})
+
+
+class GroupEventsView(APIView):
+    """No Event model exists yet — a valid empty list satisfies the client."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = None
+
+    def get(self, request, slug):
+        get_object_or_404(Group, slug=slug)
+        return Response({"success": True, "data": [], "message": "", "meta": {}})
 
 
 class GroupPendingView(APIView):

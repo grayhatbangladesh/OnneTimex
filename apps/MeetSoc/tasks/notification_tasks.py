@@ -3,6 +3,7 @@ import logging
 from asgiref.sync import async_to_sync
 from celery import shared_task
 from channels.layers import get_channel_layer
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 
@@ -101,22 +102,27 @@ def notify(recipient_id, actor_id, notification_type, verb, data=None, target_ty
     target_type_id = None
     if target_type and target_id:
         try:
+            # All of these models live in apps.MeetSoc (app_label "meetsoc"), so
+            # resolve the ContentType from the model class instead of guessing
+            # app labels (the old "posts.Post"/"groups.Group" lookups never matched).
+            from apps.MeetSoc.models import Comment, Group, Page, Post, Product
+
             model_map = {
-                "post": "posts.Post",
-                "comment": "comments.Comment",
-                "group": "groups.Group",
-                "page": "pages.Page",
-                "event": "events.Event",
-                "product": "marketplace.Product",
+                "post": Post,
+                "comment": Comment,
+                "group": Group,
+                "page": Page,
+                "product": Product,
+                "user": User,
             }
-            app_label, model_name = model_map.get(target_type, "").split(".")
-            ct = ContentType.objects.get(app_label=app_label, model=model_name)
-            target_type_id = ct.id
+            model_cls = model_map.get(target_type)
+            if model_cls is not None:
+                target_type_id = ContentType.objects.get_for_model(model_cls).id
         except Exception:
             pass
 
     notif_data = {
-        "actor_id": str(actor_id),
+        "actor_id": str(actor_id) if actor_id is not None else None,
         "notification_type": notification_type,
         "verb": verb,
         "data": data or {},
@@ -124,10 +130,17 @@ def notify(recipient_id, actor_id, notification_type, verb, data=None, target_ty
         "target_id": str(target_id) if target_id else None,
     }
     try:
-        send_notification_task.delay(recipient_id, notif_data)
-    except Exception:
-        logger.warning("Celery broker unavailable, creating notification synchronously")
-        try:
+        # Only queue to Celery when it is explicitly enabled AND the broker is
+        # reachable; otherwise create the notification right now so the row is
+        # guaranteed to exist for the client.
+        dispatched = False
+        if getattr(settings, "CELERY_ENABLED", False):
+            try:
+                send_notification_task.delay(recipient_id, notif_data)
+                dispatched = True
+            except Exception:
+                logger.warning("Celery broker unavailable, creating notification synchronously")
+        if not dispatched:
             _create_and_send_notification(recipient_id, notif_data)
-        except Exception:
-            logger.exception("Synchronous notification creation also failed")
+    except Exception:
+        logger.exception("Synchronous notification creation also failed")

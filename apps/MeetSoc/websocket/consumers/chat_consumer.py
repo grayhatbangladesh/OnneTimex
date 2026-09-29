@@ -76,21 +76,44 @@ class ChatConsumer(AsyncWebsocketConsumer):
             self.room_group_name,
             {"type": "chat.broadcast", "payload": {"type": "chat.message", "message": msg}},
         )
-        from apps.MeetSoc.tasks.notification_tasks import send_notification_task
 
         participant_ids = await self._other_participant_ids()
         for uid in participant_ids:
-            send_notification_task.delay(
-                str(uid),
-                {
-                    "actor_id": str(self.user.id),
-                    "notification_type": "message",
-                    "verb": "New message",
-                    "title": "MeetSoc",
-                    "body": data.get("content", "")[:200],
-                    "data": {"conversation_id": self.conversation_id},
-                },
-            )
+            await self._notify_participant(uid, data.get("content", ""))
+
+    async def _notify_participant(self, uid, body):
+        """Queue the message notification, falling back to a synchronous create."""
+        await self._notify_sync(
+            str(uid),
+            {
+                "actor_id": str(self.user.id),
+                "notification_type": "message",
+                "verb": "New message",
+                "title": "MeetSoc",
+                "body": (body or "")[:200],
+                "data": {"conversation_id": self.conversation_id},
+            },
+        )
+
+    @database_sync_to_async
+    def _notify_sync(self, uid, notif_data):
+        from django.conf import settings
+
+        from apps.MeetSoc.tasks.notification_tasks import (
+            _create_and_send_notification,
+            send_notification_task,
+        )
+
+        if getattr(settings, "CELERY_ENABLED", False):
+            try:
+                send_notification_task.delay(uid, notif_data)
+                return
+            except Exception:
+                logger.warning("Celery broker unavailable, creating notification synchronously")
+        try:
+            _create_and_send_notification(uid, notif_data)
+        except Exception:
+            logger.exception("Synchronous notification creation failed for user %s", uid)
 
     @database_sync_to_async
     def _save_message(self, data):

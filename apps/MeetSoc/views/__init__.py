@@ -1,4 +1,5 @@
 ﻿"""MeetSoc views - aggregated exports."""
+from .admin_views import *  # noqa: F401,F403
 from .comments_views import *  # noqa: F401,F403
 from .feed_views import *  # noqa: F401,F403
 from .friend_views import *  # noqa: F401,F403

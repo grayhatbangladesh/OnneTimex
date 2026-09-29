@@ -8,6 +8,26 @@ from apps.MeetSoc.models import Group, Page, Post, RecentSearch
 from apps.accounts.models import User
 
 
+def _people_rows(qs):
+    """Serialize user rows.
+
+    `full_name` is a Python @property on the User model, NOT a DB column, so it
+    can never be used in filter()/values()/SearchVector — build it in Python.
+    """
+    rows = []
+    for r in qs.values("id", "username", "first_name", "last_name"):
+        rows.append(
+            {
+                "id": str(r.get("id")),
+                "username": r.get("username") or "",
+                "full_name": " ".join(
+                    x for x in [r.get("first_name"), r.get("last_name")] if x
+                ).strip(),
+            }
+        )
+    return rows
+
+
 def _personalize_post_search_results(user, rows, query: str):
     """Boost rows using last-3-day search history + top category interests."""
     if not rows:
@@ -47,10 +67,10 @@ def _personalize_post_search_results(user, rows, query: str):
 
 class SearchService:
     def search(self, query, user, search_type="all", page=1):
+        results = {"people": [], "posts": [], "groups": [], "pages": []}
         if not query or len(query.strip()) < 2:
-            return {}
+            return results
         qstr = query.strip()
-        results = {}
         use_fts = connection.vendor == "postgresql"
 
         if use_fts:
@@ -60,24 +80,32 @@ class SearchService:
 
         if search_type in ("all", "people"):
             if use_fts:
-                vector = SearchVector("full_name", weight="A") + SearchVector("username", weight="B")
+                vector = (
+                    SearchVector("first_name", weight="A")
+                    + SearchVector("last_name", weight="A")
+                    + SearchVector("username", weight="B")
+                )
                 qs = (
                     User.objects.annotate(rank=SearchRank(vector, q))
                     .filter(rank__gt=0.05)
                     .order_by("-rank")[:10]
                 )
-                people = list(qs.values("id", "username", "full_name"))
+                people = _people_rows(qs)
                 if not people:
-                    people = list(
+                    people = _people_rows(
                         User.objects.filter(
-                            Q(username__icontains=qstr) | Q(full_name__icontains=qstr)
-                        ).values("id", "username", "full_name")[:10]
+                            Q(username__icontains=qstr)
+                            | Q(first_name__icontains=qstr)
+                            | Q(last_name__icontains=qstr)
+                        )[:10]
                     )
             else:
-                people = list(
+                people = _people_rows(
                     User.objects.filter(
-                        Q(username__icontains=qstr) | Q(full_name__icontains=qstr)
-                    ).values("id", "username", "full_name")[:10]
+                        Q(username__icontains=qstr)
+                        | Q(first_name__icontains=qstr)
+                        | Q(last_name__icontains=qstr)
+                    )[:10]
                 )
             results["people"] = people
 

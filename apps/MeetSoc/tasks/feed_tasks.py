@@ -43,25 +43,33 @@ def process_video_thumbnail(post_media_id):
 
 @shared_task
 def send_birthday_notifications():
+    from django.conf import settings
     from django.contrib.auth import get_user_model
 
-    from apps.MeetSoc.tasks.notification_tasks import send_notification_task
+    from apps.MeetSoc.tasks.notification_tasks import _create_and_send_notification, send_notification_task
 
     User = get_user_model()
     today = timezone.now().date()
     users = User.objects.filter(date_of_birth__month=today.month, date_of_birth__day=today.day)
     for u in users:
-        send_notification_task.delay(
-            str(u.id),
-            {
-                "actor_id": None,
-                "notification_type": "birthday",
-                "verb": "Happy birthday!",
-                "title": "MeetSoc",
-                "body": "Happy birthday!",
-                "data": {},
-            },
-        )
+        notif_data = {
+            "actor_id": None,
+            "notification_type": "birthday",
+            "verb": "Happy birthday!",
+            "title": "MeetSoc",
+            "body": "Happy birthday!",
+            "data": {},
+        }
+        if getattr(settings, "CELERY_ENABLED", False):
+            try:
+                send_notification_task.delay(str(u.id), notif_data)
+                continue
+            except Exception:
+                logger.warning("Celery broker unavailable, creating notification synchronously")
+        try:
+            _create_and_send_notification(str(u.id), notif_data)
+        except Exception:
+            logger.exception("Birthday notification failed for user %s", u.id)
 
 
 @shared_task

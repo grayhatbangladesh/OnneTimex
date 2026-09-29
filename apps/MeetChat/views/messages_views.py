@@ -105,12 +105,24 @@ class MessageListCreateView(APIView):
 
     def post(self, request, conversation_id):
         conv = get_object_or_404(Conversation, pk=conversation_id, participants=request.user)
+
+        # Optional reply target: accept `reply_to` (REST clients) or
+        # `reply_to_id` (websocket clients) and only honour messages that
+        # belong to this conversation.
+        reply = None
+        reply_id = request.data.get("reply_to") or request.data.get("reply_to_id")
+        if reply_id:
+            reply = (
+                Message.objects.filter(pk=reply_id, conversation=conv).first()
+            )
+
         m = Message.objects.create(
             conversation=conv,
             sender=request.user,
             message_type=request.data.get("message_type", "text"),
             content=request.data.get("content", ""),
             media=request.FILES.get("media"),
+            reply_to=reply,
         )
         conv.last_message = m
         conv.save(update_fields=["last_message"])
@@ -120,6 +132,45 @@ class MessageListCreateView(APIView):
         ).exclude(user=request.user).update(
             unread_count=F("unread_count") + 1
         )
+
+        # Push the message to every websocket listener in this conversation and
+        # notify the other participants. Neither may ever break sending a message.
+        message_payload = {
+            "id": str(m.id),
+            "sender_id": str(request.user.id),
+            "message_type": m.message_type,
+            "content": m.content,
+            "created_at": m.created_at.isoformat(),
+        }
+        try:
+            from asgiref.sync import async_to_sync
+            from channels.layers import get_channel_layer
+
+            channel_layer = get_channel_layer()
+            if channel_layer:
+                async_to_sync(channel_layer.group_send)(
+                    f"chat_{conv.id}",
+                    {"type": "chat.broadcast", "payload": {"type": "chat.message", "message": message_payload}},
+                )
+        except Exception:
+            pass
+
+        try:
+            from apps.MeetSoc.tasks.notification_tasks import notify
+
+            other_ids = ConversationParticipant.objects.filter(
+                conversation=conv
+            ).exclude(user=request.user).values_list("user_id", flat=True)
+            for uid in other_ids:
+                notify(
+                    recipient_id=uid,
+                    actor_id=request.user.id,
+                    notification_type="message",
+                    verb="New message",
+                    data={"conversation_id": str(conv.id)},
+                )
+        except Exception:
+            pass
 
         return Response(
             {

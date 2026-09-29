@@ -3,6 +3,7 @@ Account-level serializers: auth, profile, public user cards, friend/follow.
 All aligned with apps.accounts.models (User + UserProfile).
 """
 import random
+import re
 import string
 
 from django.contrib.auth import get_user_model
@@ -147,8 +148,13 @@ class UserPublicSerializer(serializers.Serializer):
                 "hometown": getattr(p, "hometown", ""),
                 "work": getattr(p, "work", ""),
                 "education": getattr(p, "education", ""),
+                "hobbies": getattr(p, "hobbies", ""),
                 "relationship": getattr(p, "relationship", "unspecified"),
                 "socialLinks": getattr(p, "social_links", {}),
+                "posts_count": getattr(p, "posts_count", 0),
+                "friends_count": getattr(p, "friends_count", 0),
+                "followers_count": getattr(p, "followers_count", 0),
+                "following_count": getattr(p, "following_count", 0),
             } if p else {},
         }
 
@@ -196,9 +202,17 @@ class MeSerializer(serializers.ModelSerializer):
             "hometown": p.hometown,
             "work": p.work,
             "education": p.education,
+            "hobbies": p.hobbies,
             "relationship": p.relationship,
+            "publiccontacts": p.public_contacts,
             "socialLinks": p.social_links,
             "otherInfo": p.other_info,
+            # Denormalized counters — the app renders these on the profile.
+            "posts_count": p.posts_count,
+            "friends_count": p.friends_count,
+            "followers_count": p.followers_count,
+            "following_count": p.following_count,
+            "is_private": p.is_private,
         }
 
     def get_is_verified(self, obj):
@@ -231,6 +245,7 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         fields = (
             "bio", "website", "country", "city", "hometown", "hobbies", "work",
             "education", "relationship", "public_contacts", "social_links", "other_info",
+            "is_private",
         )
 
     def validate_bio(self, value):
@@ -242,26 +257,186 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
+_GENDER_ALIASES = {
+    "male": "male",
+    "m": "male",
+    "female": "female",
+    "f": "female",
+    "other": "other",
+    "prefer_not": "prefer_not",
+    "prefer not to say": "prefer_not",
+    "prefer-not-to-say": "prefer_not",
+    "prefer_not_to_say": "prefer_not",
+    "not specified": "prefer_not",
+    "unspecified": "prefer_not",
+}
+
+# Django's E.164 rule: + then 8-15 digits, first digit 1-9.
+_PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+
+
+def _normalize_phone(raw):
+    """Accept the formats users actually type and return E.164 (or "").
+
+    Handles "+88017...", "88017...", "0088017...", separators
+    (space/dash/parentheses/dot) and the local Bangladeshi "01712345678".
+    """
+    v = re.sub(r"[\s\-().]", "", str(raw or ""))
+    if not v:
+        return ""
+    if v.startswith("00"):
+        v = "+" + v[2:]
+    if v.startswith("+"):
+        return v
+    if v.startswith("01") and len(v) == 11:
+        # Local mobile: 01712345678 -> +8801712345678
+        return "+880" + v[1:]
+    if v.isdigit():
+        return "+" + v
+    return v
+
+
+def _placeholder_phone():
+    """`User.phone` is UNIQUE and NOT NULL — email-only signups get a number.
+
+    Nobody can log in with it (login matches the real phone/email), it only
+    satisfies the column constraint.
+    """
+    for _ in range(30):
+        candidate = "+1" + "".join(random.choices(string.digits, k=9))
+        if not User.objects.filter(phone=candidate).exists():
+            return candidate
+    return "+1" + "".join(random.choices(string.digits, k=9))
+
+
+def _parse_birthday(value):
+    """Return 'YYYY-MM-DD', '' (drop the value) or None (unparseable).
+
+    Accepts ISO dates, ISO datetimes (Dart's DateTime.toIso8601String) and the
+    common day-first/month-first slash formats, so signup never 400s on a date
+    the client formatted differently.
+    """
+    from datetime import date as _date, datetime
+
+    from django.utils.dateparse import parse_date, parse_datetime
+
+    if isinstance(value, _date) and not isinstance(value, datetime):
+        return value.isoformat()
+    s = str(value).strip()
+    if not s:
+        return ""
+    dt = parse_datetime(s)
+    if dt is not None:
+        return dt.date().isoformat()
+    d = parse_date(s)
+    if d is not None:
+        return d.isoformat()
+    for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d.%m.%Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
     password_confirm = serializers.CharField(write_only=True)
+    # Declared without the model's E.164 validator: `validate_phone` accepts
+    # the formats users actually type (and an email address, see below).
+    phone = serializers.CharField(max_length=32)
+    # The app may send the whole display name as `full_name` (or dump it all
+    # into `first_name`); both are split into first/last in validate().
+    full_name = serializers.CharField(required=False, allow_blank=True, write_only=True, max_length=200)
+    first_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    last_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    date_of_birth = serializers.DateField(required=False, allow_null=True)
+    gender = serializers.CharField(required=False, allow_blank=True, max_length=20)
 
     class Meta:
         model = User
-        fields = ("phone", "email", "username", "first_name", "last_name", "password", "password_confirm")
+        fields = (
+            "phone", "email", "username",
+            "first_name", "last_name", "full_name",
+            "date_of_birth", "gender",
+            "password", "password_confirm",
+        )
+
+    def to_internal_value(self, data):
+        # Tolerate empty date_of_birth / gender ("" would fail field parsing).
+        if isinstance(data, dict):
+            data = data.copy()
+            if data.get("date_of_birth") in ("", None):
+                data.pop("date_of_birth", None)
+            elif isinstance(data.get("date_of_birth"), str):
+                parsed = _parse_birthday(data["date_of_birth"])
+                if parsed == "":
+                    data.pop("date_of_birth", None)
+                elif parsed is not None:
+                    data["date_of_birth"] = parsed
+
+            # The website signup field doubles as "email or phone". When an
+            # email address lands in `phone`, keep it as the email and give the
+            # account a generated number (the column is UNIQUE + NOT NULL).
+            raw_phone = str(data.get("phone") or "").strip()
+            if "@" in raw_phone:
+                if not str(data.get("email") or "").strip():
+                    if User.objects.filter(email__iexact=raw_phone).exists():
+                        raise serializers.ValidationError(
+                            {"email": "An account with this email already exists."}
+                        )
+                    data["email"] = raw_phone
+                data["phone"] = _placeholder_phone()
+        return super().to_internal_value(data)
+
+    def validate_phone(self, value):
+        if "@" in (value or ""):
+            return value  # already replaced in to_internal_value
+        phone = _normalize_phone(value)
+        if not _PHONE_RE.match(phone):
+            raise serializers.ValidationError(
+                "Enter your phone number with country code, e.g. +8801712345678."
+            )
+        return phone
 
     def validate_password(self, value):
         validate_password(value)
         return value
 
+    def validate_gender(self, value):
+        key = (value or "").strip().lower()
+        if not key:
+            return "prefer_not"
+        if key in dict(User.Gender.choices):
+            return key
+        return _GENDER_ALIASES.get(key, "prefer_not")
+
     def validate(self, attrs):
         if attrs["password"] != attrs["password_confirm"]:
             raise serializers.ValidationError({"password_confirm": "Passwords do not match."})
+
+        first = (attrs.get("first_name") or "").strip()
+        last = (attrs.get("last_name") or "").strip()
+        full = (attrs.pop("full_name", None) or "").strip()
+        if full and not first:
+            parts = full.split(None, 1)
+            first = parts[0]
+            last = last or (parts[1] if len(parts) > 1 else "")
+        elif first and not last and " " in first:
+            # App posts "John Doe" entirely in first_name — split it.
+            parts = first.split(None, 1)
+            first = parts[0]
+            last = parts[1]
+        if not first:
+            raise serializers.ValidationError({"first_name": "This field is required."})
+        attrs["first_name"] = first
+        attrs["last_name"] = last
         return attrs
 
     def create(self, validated_data):
         validated_data.pop("password_confirm")
         password = validated_data.pop("password")
+        validated_data.pop("full_name", None)
         return User.objects.create_user(password=password, **validated_data)
 
 
@@ -271,11 +446,17 @@ class LoginTokenObtainPairSerializer(TokenObtainPairSerializer):
     default_error_messages = {"no_active_account": "Invalid credentials."}
 
     def validate(self, attrs):
-        login_input = attrs.get("phone", "") or attrs.get("email", "")
+        login_input = (attrs.get("phone", "") or attrs.get("email", "")).strip()
         if "@" in login_input:
             user = User.objects.filter(email__iexact=login_input).first()
         else:
-            user = User.objects.filter(phone=login_input).first()
+            # Match whatever format the user types against the stored E.164.
+            normalized = _normalize_phone(login_input)
+            user = (
+                User.objects.filter(Q(phone=login_input) | Q(phone=normalized)).first()
+                if normalized
+                else None
+            )
 
         if user is None:
             raise AuthenticationFailed("No account found with this phone or email.")

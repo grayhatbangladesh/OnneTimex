@@ -21,8 +21,9 @@ class GroupMembershipSerializer(serializers.ModelSerializer):
 
 
 class GroupInviteSerializer(serializers.ModelSerializer):
-    inviter = UserPublicLiteSerializer(read_only=True)
-    invitee = UserPublicLiteSerializer(read_only=True)
+    # Model fields are `invited_by` / `invited_user`.
+    inviter = UserPublicLiteSerializer(source="invited_by", read_only=True)
+    invitee = UserPublicLiteSerializer(source="invited_user", read_only=True)
 
     class Meta:
         model = GroupInvite

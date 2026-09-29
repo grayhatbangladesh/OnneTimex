@@ -15,10 +15,15 @@ class UniversalSearchView(APIView):
     def get(self, request):
         q = request.query_params.get("q", "").strip()
         st = request.query_params.get("type", "all")
+        # Record the search BEFORE running it so history is kept even if the
+        # search itself fails.
+        if q:
+            try:
+                RecentSearch.objects.create(user=request.user, query=q[:255])
+            except Exception:
+                pass
         svc = SearchService()
         data = svc.search(q, request.user, search_type=st)
-        if q:
-            RecentSearch.objects.create(user=request.user, query=q[:255])
         return Response({"success": True, "data": data, "message": "", "meta": {}})
 
 
@@ -47,9 +52,10 @@ class TrendingView(APIView):
     serializer_class = TrendingSerializer
 
     def get(self, request):
-        conn = cache.client.get_client()
         try:
+            conn = cache.client.get_client()
             tags = conn.zrevrange("trending:hashtags", 0, 9, withscores=True)
         except Exception:
+            # LocMem/other caches expose no redis client — return an empty list.
             tags = []
         return Response({"success": True, "data": {"hashtags": tags}, "message": "", "meta": {}})

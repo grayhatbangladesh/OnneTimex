@@ -142,6 +142,15 @@ class PublicProfileView(generics.RetrieveAPIView):
     serializer_class = UserPublicSerializer
     permission_classes = [AllowAny]
 
+    def retrieve(self, request, *args, **kwargs):
+        """Return the standard {success,data,message,meta} envelope (the app
+        requires `success == true && data` before rendering a profile)."""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, context={"request": request})
+        return Response(
+            {"success": True, "data": serializer.data, "message": "", "meta": {}}
+        )
+
 
 class UsernameProfileView(APIView):
     permission_classes = [AllowAny]

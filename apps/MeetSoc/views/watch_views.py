@@ -84,13 +84,16 @@ class WatchDetailView(APIView):
             return Response({"success": False, "error": {"code": "FORBIDDEN", "message": "Content unavailable.", "details": {}}}, status=403)
         from django.core.cache import cache
 
-        from apps.recommendations.models import UserInteraction
-        from apps.recommendations.services import InterestService, InteractionService
+        try:
+            from apps.recommendations.models import UserInteraction
+            from apps.recommendations.services import InterestService, InteractionService
+        except ImportError:
+            UserInteraction = InterestService = InteractionService = None
 
         v.views_count += 1
         v.save(update_fields=["views_count"])
         ck = f"rec:wclick:{request.user.id}:{video_id}"
-        if not cache.get(ck):
+        if InteractionService is not None and not cache.get(ck):
             InteractionService.record_watch_video_event(
                 request.user, v, UserInteraction.ACTION_CLICK
             )

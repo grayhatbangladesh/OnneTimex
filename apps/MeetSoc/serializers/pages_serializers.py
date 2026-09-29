@@ -5,7 +5,8 @@ from apps.accounts.serializers import UserPublicLiteSerializer
 
 
 class PageAdminSerializer(serializers.ModelSerializer):
-    admin = UserPublicLiteSerializer(read_only=True)
+    # The model field is `user`; expose it under the documented `admin` key.
+    admin = UserPublicLiteSerializer(source="user", read_only=True)
 
     class Meta:
         model = PageAdmin

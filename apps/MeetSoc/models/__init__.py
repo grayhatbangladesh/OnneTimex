@@ -25,6 +25,7 @@ from .reactions import Reaction
 from .search import TrendingTopic
 
 from .verification import SubscriptionPlan, BlueVerificationRequest, UserSubscription
+from .suspensions import AccountSuspension
 
 __all__ = [
     "ContentCategory", "ContentTag",
@@ -44,4 +45,5 @@ __all__ = [
     "TrendingTopic",
     "Reaction",
     "SubscriptionPlan", "BlueVerificationRequest", "UserSubscription",
+    "AccountSuspension",
 ]

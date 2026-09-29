@@ -24,6 +24,7 @@ class StandardPagination(PageNumberPagination):
                     "total_count": self.page.paginator.count,
                     "next": self.get_next_link(),
                     "previous": self.get_previous_link(),
+                    "has_more": self.get_next_link() is not None,
                 },
             }
         )

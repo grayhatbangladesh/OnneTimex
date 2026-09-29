@@ -11,10 +11,16 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-pxx@ku-$dv53%w)cx0)$odp(bh^hhf225(8yz2i73k0bjtzp5@"
+# Set SECRET_KEY in the environment in production; the built-in value keeps
+# local/dev working exactly as before.
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "django-insecure-pxx@ku-$dv53%w)cx0)$odp(bh^hhf225(8yz2i73k0bjtzp5@",
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Defaults to on for local development — set DEBUG=False on the server.
+DEBUG = os.getenv("DEBUG", "true").strip().lower() in ("1", "true", "yes", "on")
 
 ALLOWED_HOSTS = ["*"]
 
@@ -35,6 +41,7 @@ INSTALLED_APPS = [
     "apps.accounts",
     "apps.MeetSoc",
     "apps.MeetChat",
+    "apps.Media",
 ]
 
 MIDDLEWARE = [
@@ -73,14 +80,22 @@ ASGI_APPLICATION = "DevazBackend.asgi.application"
 # ---------------------------------------------------------------------------
 # Channels (WebSocket)
 # ---------------------------------------------------------------------------
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer"
-        # For production with a Redis server, switch to:
-        # "BACKEND": "channels_redis.core.RedisChannelLayer",
-        # "CONFIG": {"hosts": [("127.0.0.1", 6379)]},
+# Redis is optional: with a single ASGI process (daphne) the in-memory layer
+# is enough for chat/notification/call fan-out. Set REDIS_URL (redis://…) when
+# running more than one worker or more than one instance.
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+
+if REDIS_URL:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {"hosts": [REDIS_URL]},
+        }
     }
-}
+else:
+    CHANNEL_LAYERS = {
+        "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}
+    }
 
 # ---------------------------------------------------------------------------
 # Django REST Framework + JWT
@@ -101,8 +116,10 @@ REST_FRAMEWORK = {
 from datetime import timedelta
 
 SIMPLE_JWT = {
+    # Keep the user signed in: the app auto-renews the session on every launch,
+    # so a stored account stays valid for 90 days of not being opened.
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=14),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=365),
     "AUTH_HEADER_TYPES": ("Bearer",),
     "UPDATE_LAST_LOGIN": True,
 }
@@ -116,6 +133,12 @@ CORS_ALLOW_ALL_ORIGINS = True
 RATELIMIT_POSTS_PER_HOUR = 30
 FCM_SERVER_KEY = ""
 
+# TURN relay for WebRTC calls — only included in /meetchat/calls/ice-servers/
+# responses when TURN_SERVER_URL is set; STUN is always returned.
+# TURN_SERVER_URL = "turn:turn.example.com:3478"
+# TURN_USERNAME = "meetsoc"
+# TURN_CREDENTIAL = "change-me"
+
 # HTML sanitization (bleach)
 BLEACH_ALLOWED_TAGS = [
     "a", "b", "i", "u", "strong", "em", "p", "br", "ul", "ol", "li",
@@ -126,6 +149,10 @@ BLEACH_ALLOWED_ATTRIBUTES = {"a": ["href", "title", "target"], "span": ["class"]
 # ---------------------------------------------------------------------------
 # Celery
 # ---------------------------------------------------------------------------
+# CELERY_ENABLED=False -> notification/feed tasks run inline (synchronously) in
+# the request, so rows are always created. Flip to True only when a Celery
+# worker + broker are actually running.
+CELERY_ENABLED = False
 CELERY_BROKER_URL = "redis://127.0.0.1:6379/1"
 CELERY_RESULT_BACKEND = "redis://127.0.0.1:6379/1"
 CELERY_TASK_ALWAYS_EAGER = False
@@ -193,6 +220,11 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
 
 STATIC_URL = "static/"
+
+# Uploaded media (avatars, covers, post photos/videos...)
+# Uploaded files are stored under BASE_DIR/media and served at /media/...
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field

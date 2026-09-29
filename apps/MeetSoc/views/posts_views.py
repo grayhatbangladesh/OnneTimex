@@ -130,10 +130,14 @@ class PostDetailView(APIView):
         )
         if post.is_on_hold:
             return Response({"success": False, "error": {"code": "FORBIDDEN", "message": "Content unavailable.", "details": {}}}, status=403)
-        from apps.recommendations.services import InterestService, InteractionService
+        # Recommendation analytics are optional — never let a missing app 500 the detail view.
+        try:
+            from apps.recommendations.services import InterestService, InteractionService
+        except ImportError:
+            InterestService = InteractionService = None
 
         ck = f"rec:click:{request.user.id}:{post_id}"
-        if not cache.get(ck):
+        if InteractionService is not None and not cache.get(ck):
             InteractionService.record_post_click(request.user, post)
             cache.set(ck, 1, 120)
             InterestService.refresh_profile_snapshot(request.user)
@@ -194,10 +198,14 @@ class PostShareView(APIView):
             privacy=request.data.get("privacy", "public"),
             shared_post=original,
         )
-        from apps.recommendations.services import InterestService, InteractionService
+        try:
+            from apps.recommendations.services import InterestService, InteractionService
+        except ImportError:
+            InterestService = InteractionService = None
 
-        InteractionService.record_post_share(request.user, original)
-        InterestService.refresh_profile_snapshot(request.user)
+        if InteractionService is not None:
+            InteractionService.record_post_share(request.user, original)
+            InterestService.refresh_profile_snapshot(request.user)
         original.shares_count += 1
         original.save(update_fields=["shares_count"])
 
@@ -252,10 +260,13 @@ class PostViewRegisterView(APIView):
         post.views_count = PV.objects.filter(post=post).count()
         post.save(update_fields=["views_count"])
         watch_seconds = float(request.data.get("watch_seconds") or 0)
-        from apps.recommendations.services import InterestService, InteractionService
+        try:
+            from apps.recommendations.services import InterestService, InteractionService
+        except ImportError:
+            InterestService = InteractionService = None
 
         # First unique view: log interaction; further watch time should use POST /recommendations/track/
-        if created:
+        if created and InteractionService is not None:
             InteractionService.record_post_view(request.user, post, watch_seconds=watch_seconds)
             InterestService.refresh_profile_snapshot(request.user)
         return Response({"success": True, "data": {}, "message": "View recorded.", "meta": {}})
@@ -400,11 +411,33 @@ class StoryCommentListCreateView(APIView):
         )
         story.comments_count = StoryComment.objects.filter(story=story).count()
         story.save(update_fields=["comments_count"])
+        self._notify_story_owner(request.user, story, "post_comment",
+                                 f"{request.user.full_name or request.user.username} commented on your story",
+                                 {"story_id": str(story.id), "comment_id": str(comment.id)})
         return Response({
             "success": True,
             "data": StoryCommentSerializer(comment, context={"request": request}).data,
             "message": "Comment posted.",
         }, status=201)
+
+    @staticmethod
+    def _notify_story_owner(actor, story, ntype, verb, data):
+        try:
+            owner_id = story.author_id if hasattr(story, "author_id") else getattr(story, "user_id", None)
+            if not owner_id or owner_id == actor.id:
+                return
+            from apps.MeetSoc.tasks.notification_tasks import notify
+            notify(
+                recipient_id=owner_id,
+                actor_id=actor.id,
+                notification_type=ntype,
+                verb=verb,
+                data=data,
+                target_type="post",
+                target_id=story.id,
+            )
+        except Exception:
+            pass
 
 
 class StoryReactView(APIView):
@@ -421,6 +454,15 @@ class StoryReactView(APIView):
             StoryReaction.objects.create(story=story, user=request.user, reaction_type=reaction_type)
         story.reactions_count = StoryReaction.objects.filter(story=story).count()
         story.save(update_fields=["reactions_count"])
+        if not existing:
+            # Only notify on the first reaction, not on every type change.
+            StoryCommentListCreateView._notify_story_owner(
+                request.user,
+                story,
+                "post_like",
+                f"{request.user.full_name or request.user.username} reacted to your story",
+                {"story_id": str(story.id), "reaction_type": reaction_type},
+            )
         return Response({"success": True, "data": {"reactions_count": story.reactions_count}, "message": ""})
 
     def delete(self, request, story_id):

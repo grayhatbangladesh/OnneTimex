@@ -202,9 +202,34 @@ class CommentReactView(APIView):
                     comment.reactions_count.pop(old_type, None)
                 comment.reactions_count[reaction_type] = comment.reactions_count.get(reaction_type, 0) + 1
                 comment.save(update_fields=["reactions_count"])
+                self._notify_reactor(request.user, comment, reaction_type)
                 return Response({"success": True, "data": {"reacted": True, "reaction_type": reaction_type, "reactions_count": comment.reactions_count}, "message": "Updated.", "meta": {}})
         else:
             CommentReaction.objects.create(comment=comment, user=request.user, reaction_type=reaction_type)
             comment.reactions_count[reaction_type] = comment.reactions_count.get(reaction_type, 0) + 1
             comment.save(update_fields=["reactions_count"])
+            self._notify_reactor(request.user, comment, reaction_type)
             return Response({"success": True, "data": {"reacted": True, "reaction_type": reaction_type, "reactions_count": comment.reactions_count}, "message": "Liked.", "meta": {}})
+
+    @staticmethod
+    def _notify_reactor(actor, comment, reaction_type):
+        """Tell the comment author somebody reacted (no notification on remove)."""
+        if comment.author_id == actor.id:
+            return
+        try:
+            from apps.MeetSoc.tasks.notification_tasks import notify
+            notify(
+                recipient_id=comment.author_id,
+                actor_id=actor.id,
+                notification_type="post_like",
+                verb=f"{actor.full_name or actor.username} reacted to your comment",
+                data={
+                    "comment_id": str(comment.id),
+                    "post_id": str(comment.post_id),
+                    "reaction_type": reaction_type,
+                },
+                target_type="comment",
+                target_id=comment.id,
+            )
+        except Exception:
+            pass

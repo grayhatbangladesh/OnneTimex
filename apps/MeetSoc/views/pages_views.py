@@ -6,8 +6,9 @@ from rest_framework.views import APIView
 
 from apps.MeetSoc.models import Page, PageAdmin, PageFollower
 from apps.MeetSoc.serializers import PageSerializer, PageAdminSerializer, PageFollowerSerializer
-from apps.MeetSoc.models import Post
-from apps.MeetSoc.serializers import PostListSerializer
+from apps.MeetSoc.models import Post, PostMedia
+from apps.MeetSoc.serializers import PostDetailSerializer, PostListSerializer
+from apps.MeetSoc.core.media_processing import optimize_media
 from apps.MeetSoc.core.utils import sanitize_html
 
 
@@ -203,8 +204,22 @@ class PagePostsView(APIView):
             privacy="public",
             page=p,
         )
+        # Same upload handling as POST /meetsoc/posts/ so page media actually saves.
+        for i, f in enumerate(request.FILES.getlist("files")):
+            mt = "video" if (f.content_type and f.content_type.startswith("video")) else "image"
+            PostMedia.objects.create(
+                post=post,
+                file=optimize_media(f),
+                media_type=mt,
+                order=i,
+            )
         return Response(
-            {"success": True, "data": {"id": str(post.id)}, "message": "Posted.", "meta": {}},
+            {
+                "success": True,
+                "data": PostDetailSerializer(post, context={"request": request}).data,
+                "message": "Posted.",
+                "meta": {},
+            },
             status=201,
         )
 
